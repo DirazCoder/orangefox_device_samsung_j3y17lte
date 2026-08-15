@@ -64,3 +64,7 @@ TW_INCLUDE_CRYPTO := true
 
 # Debug flags
 TW_NEVER_UNMOUNT_SYSTEM := true
+
+# SHRP
+SHRP_DEVICE_CODE := j3y17lte
+SHRP_MAINTAINER := notnoelchannel
