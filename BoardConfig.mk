@@ -57,7 +57,7 @@ TW_HAS_DOWNLOAD_MODE := true
 TW_EXCLUDE_SUPERSU := true
 TW_INCLUDE_NTFS_3G := true
 TW_EXTRA_LANGUAGES := true
-
+TW_DEVICE_VERSION	:= 0_notnoelchannel
 
 # Encryption support
 TW_INCLUDE_CRYPTO := true
