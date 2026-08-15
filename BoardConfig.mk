@@ -65,6 +65,9 @@ TW_INCLUDE_CRYPTO := true
 # Debug flags
 TW_NEVER_UNMOUNT_SYSTEM := true
 
+# OrangeFox
+FOX_ENABLE_APP_MANAGER := 1
+
 # SHRP
 SHRP_DEVICE_CODE := j3y17lte
 SHRP_MAINTAINER := notnoelchannel
