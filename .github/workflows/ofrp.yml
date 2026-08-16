@@ -43,15 +43,116 @@ jobs:
         cd ~/TWRP
         mkdir ~/.bin
         curl http://commondatastorage.googleapis.com/git-repo-downloads/repo > ~/.bin/repo
-        python3 ~/.bin/repo init --depth=1 -u https://github.com/unlegacy-devices/fox-7.1_manifest.git -b twrp-7.1
+        python3 ~/.bin/repo init --depth=1 -u https://github.com/unlegacy-devices/fox-7.1_manifest.git -b fox-7.1
         git clone --branch android-6.0 --single-branch https://github.com/notnoelchannel2/twrp_device_samsung_j3y17lte.git ~/TWRP/device/samsung/j3y17lte
         python3 ~/.bin/repo sync -c --force-sync --optimized-fetch --no-tags --no-clone-bundle --prune -j$(nproc --all)
+    - name: Downloading Magisk v30.7 for Fox Addons
+      run: |
+        mkdir -p ~/fox-addons
+        curl -L -o ~/fox-addons/Magisk-v30.7.zip https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
+        echo "Saved to ~/fox-addons/Magisk-v30.7.zip — build step points FOX_USE_SPECIFIC_MAGISK_ZIP at this file"
+    - name: Patching fox_list_apps for user + system apps
+      run: |
+        TARGET=$(find ~/TWRP -type f -path "*FoxExtras/sbin/fox_list_apps" 2>/dev/null | head -n1)
+        if [ -z "$TARGET" ]; then
+          echo "fox_list_apps not found in synced source — skipping patch, App Manager list may stay broken."
+        else
+          echo "Patching: $TARGET"
+        cat > "$TARGET" << 'FOXLISTAPPS_EOF'
+        #!/sbin/sh
+        # fox_list_apps - patched
+        #
+        
+        list_dir="/tmp/listapps/list"
+        rm -rf /tmp/listapps
+        mkdir -p "$list_dir"
+        
+        # advanced.xml's apps_load page only mounts /data before calling this
+        # script, so /system scanning would come back empty without this.
+        # Both calls can fail silently (already mounted, or no separate
+        # /system partition on this layout) - that's fine, ignore it.
+        mount /system 2>/dev/null
+        mount -o ro /system 2>/dev/null
+        
+        # No aapt here - recovery doesn't run PackageManager, so there's no
+        # real label to fetch anyway. Package ID for everything, user and
+        # system alike, so what you see is what you'd target for backup/delete.
+        add_entry() {
+            local fullpath="$1"
+            local tag="$2"
+            local parent
+            local pkgname
+            local display
+        
+            # parameter expansion instead of basename/dirname - saves two
+            # forks per app, which adds up once you're running this on
+            # hundreds of them
+            local dir_only="${fullpath%/*}"
+            parent="${dir_only##*/}"
+            case "$parent" in
+                base.apk|"") pkgname="${fullpath##*/}"; pkgname="${pkgname%.apk}" ;;
+                *) pkgname="${parent%%-*}" ;;
+            esac
+            [ -z "$pkgname" ] && return
+        
+            if [ "$tag" = "system" ]; then
+                display="[System] ${pkgname}"
+            else
+                display="${pkgname}"
+            fi
+        
+            # filenames can't contain '/'. no portable way to global-replace
+            # with parameter expansion, so tr it is - but only when there's
+            # actually a slash to fix, no point forking otherwise
+            case "$display" in
+                */*) display="$(echo "$display" | tr '/' '-')" ;;
+            esac
+        
+            # keyed on package name so the same app can't show up twice
+            [ -e "$list_dir/$display" ] && return
+        
+            # advanced.xml's delete action runs:
+            #   rm -rf "$(cat "%amgr_file%")"
+            # so the entry file has to hold the real path, not be empty. For
+            # something like /data/app/pkg-hash/base.apk that's the pkg-hash
+            # folder, one level up. Same deal for system apps - deleting the
+            # wrong one here can break boot, and there's no extra confirmation
+            # beyond the usual swipe.
+            echo "$dir_only" > "$list_dir/$display" 2>/dev/null
+        }
+        
+        scan_dir() {
+            local base_dir="$1"
+            local tag="$2"
+            [ -d "$base_dir" ] || return
+            find "$base_dir" -mindepth 1 -maxdepth 3 -iname "*.apk" 2>/dev/null | while read -r fullpath; do
+                add_entry "$fullpath" "$tag"
+            done
+        }
+        
+        scan_dir "/data/app" "user"
+        
+        # try the flat AOSP path first, then the nested one some OEM builds
+        # use instead. Confirmed on this device: /system mounts the partition
+        # root, and the real tree lives one level down at /system/system/app,
+        # alongside product/vendor.
+        scan_dir "/system/app" "system"
+        scan_dir "/system/priv-app" "system"
+        scan_dir "/system/system/app" "system"
+        scan_dir "/system/system/priv-app" "system"
+        
+        exit 0
+        FOXLISTAPPS_EOF
+          chmod 755 "$TARGET"
+          echo "Patched fox_list_apps successfully"
+        fi
     - name: Building TWRP
       run: |
         OLDPATH=$PATH
         OLDJAVAHOME=$JAVA_HOME
         export PATH="$HOME/.jdk_7/java-se-7u75-ri/bin:$PATH"
         export JAVA_HOME="$HOME/.jdk_7/java-se-7u75-ri"
+        export FOX_USE_SPECIFIC_MAGISK_ZIP="$HOME/fox-addons/Magisk-v30.7.zip"
         cd ~/TWRP
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
@@ -75,14 +176,44 @@ jobs:
         mka recoveryimage
         export PATH=$OLDPATH
         export JAVA_HOME=$OLDJAVAHOME
+    - name: Repackaging OrangeFox zip
+      id: repackage
+      run: |
+        cd /home/runner/TWRP/out/target/product/j3y17lte
+        FOX_ZIP=$(find . -maxdepth 1 -iname "OrangeFox*.zip" | head -n1)
+        if [ -z "$FOX_ZIP" ]; then
+          echo "No OrangeFox zip found to repackage — skipping."
+        else
+          echo "Repackaging: $FOX_ZIP"
+          mkdir -p /tmp/fox_repack
+          unzip -q "$FOX_ZIP" -d /tmp/fox_repack
+          rm -f "$FOX_ZIP"
+          cd /tmp/fox_repack
+          OUT_ZIP="/home/runner/TWRP/out/target/product/j3y17lte/$(basename "$FOX_ZIP")"
+          rm -f "$OUT_ZIP"
+          zip -X -D "$OUT_ZIP" META-INF/com/google/android/updater-script META-INF/com/google/android/update-binary > /dev/null
+          zip -r -X -D "$OUT_ZIP" META-INF -x "META-INF/com/google/android/updater-script" -x "META-INF/com/google/android/update-binary" > /dev/null
+          zip -r -X -D "$OUT_ZIP" . -x "META-INF/*" > /dev/null
+          echo "Repackaged $(basename "$FOX_ZIP") with META-INF first"
+          echo "zip_name=$(basename "$FOX_ZIP")" >> "$GITHUB_OUTPUT"
+        fi
     - name: Uploading TWRP builds
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v7
       with:
         name: ofrp
         path: /home/runner/TWRP/out/target/product/j3y17lte/recovery.*
         
-    - name: Uploading OFRP ZIP builds
-      uses: actions/upload-artifact@v5
+    - name: Uploading OFRP ZIP build (installer, unzipped download)
+      if: steps.repackage.outputs.zip_name != ''
+      uses: actions/upload-artifact@v7
       with:
-        name: ofrpzip
-        path: /home/runner/TWRP/out/target/product/j3y17lte/*.zip
+        path: /home/runner/TWRP/out/target/product/j3y17lte/${{ steps.repackage.outputs.zip_name }}
+        archive: false
+
+    - name: Uploading extra theme zips
+      uses: actions/upload-artifact@v7
+      with:
+        name: ofrp-extras
+        path: |
+          /home/runner/TWRP/out/target/product/j3y17lte/*.zip
+          !/home/runner/TWRP/out/target/product/j3y17lte/${{ steps.repackage.outputs.zip_name }}
